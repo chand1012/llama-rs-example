@@ -47,6 +47,8 @@ struct Args {
     grammar_file: Option<PathBuf>,
     #[arg(long, help = "disable GPU acceleration")]
     disable_gpu: bool,
+    #[arg(long, help = "enable streaming")]
+    stream: bool,
 }
 
 fn main() -> Result<()> {
@@ -103,13 +105,25 @@ fn main() -> Result<()> {
                 print!("Assistant: ");
                 std::io::stdout().flush()?;
 
-                // Use a reasonable max_tokens value that fits within context
-                let response = llama.generate(&chat_history, 2048)?;
-                print!("{}", response);
-                println!();
+                if args.stream {
+                    // Use a reasonable max_tokens value that fits within context
+                    let response = llama.stream(&chat_history, 2048, |token| {
+                        print!("{}", token);
+                        std::io::stdout().flush()?;
+                        Ok(())
+                    })?;
 
-                chat_history.push_str(&response);
-                chat_history.push('\n');
+                    println!();
+                    chat_history.push_str(&response);
+                    chat_history.push('\n');
+                } else {
+                    let response = llama.generate(&chat_history, 2048)?;
+                    print!("{}", response);
+                    println!();
+
+                    chat_history.push_str(&response);
+                    chat_history.push('\n');
+                }
             }
             Err(err) => {
                 println!("Error: {}", err);

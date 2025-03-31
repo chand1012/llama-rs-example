@@ -29,7 +29,7 @@ impl Llama {
         seed: Option<u32>,
         grammar: Option<&str>,
         verbose: bool,
-        disable_gpu: bool,
+        _disable_gpu: bool,
     ) -> Result<Self> {
         // Initialize logging if verbose
         if verbose {
@@ -42,7 +42,7 @@ impl Llama {
         // Create model parameters
         // if we're on windows or linux and GPU is not disabled, we need to force gpu
         #[cfg(any(target_os = "windows", target_os = "linux"))]
-        let model_params = if !disable_gpu {
+        let model_params = if !_disable_gpu {
             LlamaModelParams::default().with_n_gpu_layers(1000)
         } else {
             LlamaModelParams::default()
@@ -204,25 +204,83 @@ impl Llama {
         }
         Ok(text)
     }
+
+    /// Stream text from a prompt, calling the provided callback function for each token generated
+    /// Returns the complete generated text as a string
+    pub fn stream<F>(&mut self, prompt: &str, max_tokens: i32, mut callback: F) -> Result<String>
+    where
+        F: FnMut(&str) -> Result<()>,
+    {
+        // Tokenize the prompt
+        let tokens_list = self
+            .model
+            .str_to_token(prompt, AddBos::Always)
+            .context("Failed to tokenize prompt")?;
+
+        // Verify context size
+        let n_ctx = self.ctx.n_ctx() as i32;
+        let n_kv_req = tokens_list.len() as i32 + (max_tokens - tokens_list.len() as i32);
+
+        if n_kv_req > n_ctx {
+            anyhow::bail!("Required KV cache size is too large for context window");
+        }
+
+        if tokens_list.len() >= usize::try_from(max_tokens)? {
+            anyhow::bail!("Prompt is longer than maximum allowed tokens");
+        }
+
+        // Clear and prepare batch
+        self.batch.clear();
+
+        // Process prompt tokens
+        let last_index = (tokens_list.len() - 1) as i32;
+        for (i, token) in (0_i32..).zip(tokens_list.into_iter()) {
+            let is_last = i == last_index;
+            self.batch.add(token, i, &[0], is_last)?;
+        }
+
+        // Initial decode
+        self.ctx
+            .decode(&mut self.batch)
+            .context("Failed to decode. Input may exceed max tokens.")?;
+
+        let mut n_cur = self.batch.n_tokens();
+        let mut decoder = encoding_rs::UTF_8.new_decoder();
+        let mut output = String::new();
+
+        // Generation loop
+        while n_cur <= max_tokens {
+            // Sample next token
+            let token = self.sampler.sample(&self.ctx, self.batch.n_tokens() - 1);
+
+            // only run this if the grammar is None
+            if !self.use_grammar {
+                self.sampler.accept(token);
+            }
+
+            // Check for end of generation
+            if self.model.is_eog_token(token) {
+                break;
+            }
+
+            // Convert token to text and stream it
+            let output_bytes = self.model.token_to_bytes(token, Special::Tokenize)?;
+            let mut token_text = String::with_capacity(32);
+            let _ = decoder.decode_to_string(&output_bytes, &mut token_text, false);
+            callback(&token_text)?;
+            output.push_str(&token_text);
+
+            // Prepare next iteration
+            self.batch.clear();
+            self.batch.add(token, n_cur, &[0], true)?;
+            n_cur += 1;
+
+            // Decode
+            self.ctx
+                .decode(&mut self.batch)
+                .context("Failed to decode. Output may exceed max tokens.")?;
+        }
+
+        Ok(output)
+    }
 }
-
-// #[cfg(test)]
-// mod tests {
-//     use super::*;
-//     use std::path::Path;
-
-//     #[test]
-//     fn test_llama_creation() {
-//         let model_path = Path::new("path/to/test/model.gguf");
-//         let result = Llama::new(
-//             model_path.to_path_buf(),
-//             None,
-//             Some(4),
-//             None,
-//             Some(1234),
-//             false,
-//         );
-//         // This will fail since we don't have a real model file
-//         assert!(result.is_err());
-//     }
-// }
