@@ -45,6 +45,8 @@ struct Args {
     verbose: bool,
     #[arg(long, help = "path to a grammar file in GBNF format")]
     grammar_file: Option<PathBuf>,
+    #[arg(long, help = "disable GPU acceleration")]
+    disable_gpu: bool,
 }
 
 fn main() -> Result<()> {
@@ -72,6 +74,7 @@ fn main() -> Result<()> {
         args.seed,
         grammar.as_deref(),
         args.verbose,
+        args.disable_gpu,
     )?;
 
     // Initialize the chat interface
