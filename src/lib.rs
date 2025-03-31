@@ -29,6 +29,7 @@ impl Llama {
         seed: Option<u32>,
         grammar: Option<&str>,
         verbose: bool,
+        disable_gpu: bool,
     ) -> Result<Self> {
         // Initialize logging if verbose
         if verbose {
@@ -39,9 +40,13 @@ impl Llama {
         let backend = LlamaBackend::init()?;
 
         // Create model parameters
-        // if we're on windows or linux, we need to force gpu
+        // if we're on windows or linux and GPU is not disabled, we need to force gpu
         #[cfg(any(target_os = "windows", target_os = "linux"))]
-        let model_params = LlamaModelParams::default().with_n_gpu_layers(1000);
+        let model_params = if !disable_gpu {
+            LlamaModelParams::default().with_n_gpu_layers(1000)
+        } else {
+            LlamaModelParams::default()
+        };
         #[cfg(not(any(target_os = "windows", target_os = "linux")))]
         let model_params = LlamaModelParams::default();
 
@@ -135,7 +140,7 @@ impl Llama {
         // Initial decode
         self.ctx
             .decode(&mut self.batch)
-            .context("Failed to decode")?;
+            .context("Failed to decode. Input may exceed max tokens.")?;
 
         let mut n_cur = self.batch.n_tokens();
         let mut output = String::new();
@@ -173,7 +178,7 @@ impl Llama {
             // Decode
             self.ctx
                 .decode(&mut self.batch)
-                .context("Failed to decode")?;
+                .context("Failed to decode. Output may exceed max tokens.")?;
         }
 
         Ok(output)
