@@ -9,7 +9,6 @@ use llama_cpp_2::sampling::LlamaSampler;
 use llama_cpp_2::{send_logs_to_tracing, LogOptions};
 use std::num::NonZeroU32;
 use std::path::PathBuf;
-use std::pin::pin;
 
 pub struct Llama {
     model: Box<LlamaModel>,
@@ -40,7 +39,11 @@ impl Llama {
         let backend = LlamaBackend::init()?;
 
         // Create model parameters
-        let model_params = pin!(LlamaModelParams::default());
+        // if we're on windows or linux, we need to force gpu
+        #[cfg(any(target_os = "windows", target_os = "linux"))]
+        let model_params = LlamaModelParams::default().with_n_gpu_layers(1000);
+        #[cfg(not(any(target_os = "windows", target_os = "linux")))]
+        let model_params = LlamaModelParams::default();
 
         // Load the model
         let model = Box::new(
