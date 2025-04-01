@@ -49,6 +49,11 @@ struct Args {
     disable_gpu: bool,
     #[arg(long, help = "enable streaming")]
     stream: bool,
+    #[arg(
+        long,
+        help = "enable embeddings. Runs the embedding model on the system prompt and exits."
+    )]
+    embeddings: bool,
 }
 
 fn main() -> Result<()> {
@@ -75,9 +80,16 @@ fn main() -> Result<()> {
         args.threads_batch,
         args.seed,
         grammar.as_deref(),
+        args.embeddings,
         args.verbose,
         args.disable_gpu,
     )?;
+
+    if args.embeddings {
+        let embedding = llama.embed(&args.system_prompt)?;
+        println!("Embedding: {:?}", embedding);
+        return Ok(());
+    }
 
     // Initialize the chat interface
     let mut rl = DefaultEditor::new()?;

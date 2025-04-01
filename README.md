@@ -7,6 +7,7 @@ This is my reference implementation of a high level wrapper around llama-cpp-rs.
 - Simple interface
 - Grammar support
 - Cross platform support (Windows, Linux, MacOS)
+- Support for text generation and embedding
 - GPU Acceleration via Vulkan & Metal
   - This means its cross-GPU compatible, working on AMD, Intel, and NVIDIA GPUs.
 
@@ -78,6 +79,12 @@ Use JSON grammar for structured output:
 cargo run -- path/to/model.gguf --grammar-file grammars/json.gbnf
 ```
 
+Run the embedding model on the system prompt and exit:
+
+```bash
+cargo run -- path/to/model.gguf --embeddings
+```
+
 ### Interactive Usage
 
 Once running, you can:
@@ -87,3 +94,31 @@ Once running, you can:
 3. Type 'exit' to quit the program
 
 The chat history is maintained throughout the session, allowing for contextual conversations.
+
+## API
+
+### Initialize the model
+
+```rust
+let llama = Llama::new(model_path, ctx_size, n_threads, n_batch, seed, grammar, embedding, verbose, disable_gpu)?;
+```
+
+### Generate text
+
+```rust
+let text = llama.generate(prompt, max_tokens)?;
+```
+
+### Stream text
+
+```rust
+llama.stream(prompt, max_tokens, |text| {
+    println!("{}", text);
+});
+```
+
+### Embed text
+
+```rust
+let embedding = llama.embed(text)?;
+```

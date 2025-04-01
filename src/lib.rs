@@ -16,6 +16,7 @@ pub struct Llama {
     sampler: LlamaSampler,
     batch: LlamaBatch,
     use_grammar: bool, // probably a better way to check but good enough for now
+    embedding: bool,
 }
 
 impl Llama {
@@ -28,6 +29,7 @@ impl Llama {
         n_batch: Option<i32>,
         seed: Option<u32>,
         grammar: Option<&str>,
+        embedding: bool,
         verbose: bool,
         _disable_gpu: bool,
     ) -> Result<Self> {
@@ -58,14 +60,16 @@ impl Llama {
 
         // Initialize context parameters
         let mut ctx_params = LlamaContextParams::default()
+            .with_n_threads(
+                n_threads.unwrap_or(std::thread::available_parallelism()?.get().try_into()?),
+            )
+            .with_n_threads_batch(n_batch.unwrap_or(
+                n_threads.unwrap_or(std::thread::available_parallelism()?.get().try_into()?),
+            ))
             .with_n_ctx(ctx_size.or(Some(NonZeroU32::new(2048).unwrap())));
 
-        // Set thread counts if specified
-        if let Some(threads) = n_threads {
-            ctx_params = ctx_params.with_n_threads(threads);
-        }
-        if let Some(batch_threads) = n_batch.or(n_threads) {
-            ctx_params = ctx_params.with_n_threads_batch(batch_threads);
+        if embedding {
+            ctx_params = ctx_params.with_embeddings(true);
         }
 
         // Create context
@@ -76,12 +80,6 @@ impl Llama {
                     .context("Failed to create context")?,
             )
         };
-
-        // Create sampler with seed
-        // let sampler = LlamaSampler::chain_simple([
-        //     LlamaSampler::dist(seed.unwrap_or(1234)),
-        //     LlamaSampler::greedy(),
-        // ]);
 
         let sampler = match grammar {
             Some(grammar) => LlamaSampler::chain_simple([
@@ -104,11 +102,15 @@ impl Llama {
             sampler,
             batch,
             use_grammar: grammar.is_some(),
+            embedding,
         })
     }
 
     /// Generate text from a prompt
     pub fn generate(&mut self, prompt: &str, max_tokens: i32) -> Result<String> {
+        if self.embedding {
+            anyhow::bail!("Model is not configured for text generation");
+        }
         // Tokenize the prompt
         let tokens_list = self
             .model
@@ -205,12 +207,125 @@ impl Llama {
         Ok(text)
     }
 
+    /// Generate an embedding
+    /// Returns a vector of floats
+    /// The length of the vector is the embedding dimension
+    /// The embedding dimension is specified in the model parameters
+    pub fn embed(&mut self, text: &str) -> Result<Vec<f32>> {
+        if !self.embedding {
+            anyhow::bail!("Model is not configured for embeddings");
+        }
+        let tokens = self
+            .model
+            .str_to_token(text, AddBos::Always)
+            .with_context(|| format!("Failed to tokenize {text}"))?;
+        let n_ctx = self.ctx.n_ctx() as usize;
+
+        if tokens.len() > n_ctx {
+            anyhow::bail!("Text is longer than maximum allowed tokens");
+        }
+
+        self.batch.clear();
+
+        // Add tokens to batch with sequence ID 0
+        self.batch.add_sequence(&tokens, 0, false)?;
+
+        // Clear KV cache and decode
+        self.ctx.clear_kv_cache();
+        self.ctx
+            .decode(&mut self.batch)
+            .context("Failed to decode batch")?;
+
+        // Get embeddings for the sequence
+        let embeddings = self
+            .ctx
+            .embeddings_seq_ith(0)
+            .context("Failed to get embeddings")?;
+
+        Ok(embeddings.to_vec())
+    }
+
+    /// Generate embeddings for multiple texts in batches
+    /// Returns a vector of embeddings, preserving the order of input texts
+    /// Each embedding is a vector of floats with length equal to the model's embedding dimension
+    pub fn batch_embed(&mut self, texts: &[String]) -> Result<Vec<Vec<f32>>> {
+        if !self.embedding {
+            anyhow::bail!("Model is not configured for embeddings");
+        }
+
+        let n_ctx = self.ctx.n_ctx() as usize;
+        let mut output = Vec::with_capacity(texts.len());
+
+        // Tokenize all texts first
+        let tokens_list = texts
+            .iter()
+            .map(|text| self.model.str_to_token(text, AddBos::Always))
+            .collect::<Result<Vec<_>, _>>()
+            .with_context(|| "Failed to tokenize texts")?;
+
+        // Check if any text exceeds context size
+        if tokens_list.iter().any(|tokens| tokens.len() > n_ctx) {
+            anyhow::bail!("One or more texts exceed the maximum allowed tokens");
+        }
+
+        let mut max_seq_id = 0;
+
+        // Process texts in batches that fit within context window
+        for tokens in &tokens_list {
+            // If adding these tokens would exceed context size, process current batch first
+            if (self.batch.n_tokens() as usize + tokens.len()) > n_ctx {
+                // Clear KV cache and decode current batch
+                self.ctx.clear_kv_cache();
+                self.ctx
+                    .decode(&mut self.batch)
+                    .context("Failed to decode batch")?;
+
+                // Get embeddings for all sequences in current batch
+                for seq_id in 0..max_seq_id {
+                    let embedding = self.ctx.embeddings_seq_ith(seq_id).with_context(|| {
+                        format!("Failed to get embeddings for sequence {seq_id}")
+                    })?;
+                    output.push(embedding.to_vec());
+                }
+
+                // Clear batch for next round
+                self.batch.clear();
+                max_seq_id = 0;
+            }
+
+            // Add new sequence to batch
+            self.batch.add_sequence(tokens, max_seq_id, false)?;
+            max_seq_id += 1;
+        }
+
+        // Process final batch if there are any remaining sequences
+        if max_seq_id > 0 {
+            self.ctx.clear_kv_cache();
+            self.ctx
+                .decode(&mut self.batch)
+                .context("Failed to decode final batch")?;
+
+            for seq_id in 0..max_seq_id {
+                let embedding = self
+                    .ctx
+                    .embeddings_seq_ith(seq_id)
+                    .with_context(|| format!("Failed to get embeddings for sequence {seq_id}"))?;
+                output.push(embedding.to_vec());
+            }
+        }
+
+        Ok(output)
+    }
+
     /// Stream text from a prompt, calling the provided callback function for each token generated
     /// Returns the complete generated text as a string
     pub fn stream<F>(&mut self, prompt: &str, max_tokens: i32, mut callback: F) -> Result<String>
     where
         F: FnMut(&str) -> Result<()>,
     {
+        if self.embedding {
+            anyhow::bail!("Model is not configured for text generation");
+        }
         // Tokenize the prompt
         let tokens_list = self
             .model
